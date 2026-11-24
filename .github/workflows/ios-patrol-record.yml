@@ -1,0 +1,85 @@
+name: iOS Patrol Test with Recording
+
+# ADDED: manually triggered workflow, will not run automatically on commits
+on:
+  workflow_dispatch:
+
+jobs:
+  patrol-ios:
+    runs-on: macos-latest
+    timeout-minutes: 40
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode.app
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.29.2'  # MODIFIED: adjust to your local Flutter version (project SDK ^3.8.1 corresponds to Flutter 3.29+)
+          channel: 'stable'
+          cache: true
+
+      - name: Flutter pub get
+        run: flutter pub get
+
+      - name: Install Patrol CLI
+        run: dart pub global activate patrol_cli
+
+      - name: Add pub cache bin to PATH
+        run: echo "$HOME/.pub-cache/bin" >> $GITHUB_PATH
+
+      - name: Boot iOS Simulator
+        id: simulator
+        run: |
+          # ADDED: create and boot a fixed simulator, output UDID for subsequent steps
+          DEVICE_ID=$(xcrun simctl create "Patrol-iPhone" "com.apple.CoreSimulator.SimDeviceType.iPhone-15" "com.apple.CoreSimulator.SimRuntime.iOS-17-5")
+          xcrun simctl boot "$DEVICE_ID"
+          echo "udid=$DEVICE_ID" >> $GITHUB_OUTPUT
+          # Wait for the simulator to fully boot
+          xcrun simctl bootstatus "$DEVICE_ID" -b
+
+      - name: Start screen recording
+        run: |
+          # ADDED: record in background, H.264 codec balances file size and compatibility
+          xcrun simctl io booted recordVideo --codec=h264 /tmp/patrol-recording.mp4 &
+          echo "RECORDING_PID=$!" >> $GITHUB_ENV
+          sleep 2  # ensure recording has started
+
+      - name: Run Patrol test
+        run: |
+          # ADDED: run Patrol test on the booted simulator, --device uses the UDID output earlier
+          patrol test \
+            --target patrol_test/app_test.dart \
+            --device ${{ steps.simulator.outputs.udid }}
+
+      - name: Stop screen recording
+        if: always()  # stop recording even if the test fails
+        run: |
+          kill -INT $RECORDING_PID || true
+          sleep 3  # wait for file to be written
+
+      - name: Optimize recording size
+        if: always()
+        run: |
+          # ADDED: use ffmpeg to compress the recording, CRF 28 keeps content readable while reducing file size
+          # macOS runners come with ffmpeg preinstalled
+          if [ -f /tmp/patrol-recording.mp4 ]; then
+            ffmpeg -i /tmp/patrol-recording.mp4 \
+              -c:v libx264 -crf 28 -preset fast -movflags +faststart \
+              -an /tmp/patrol-recording-optimized.mp4
+            ls -lh /tmp/patrol-recording*.mp4
+          else
+            echo "No recording file found"
+          fi
+
+      - name: Upload recording artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: patrol-ios-recording
+          path: /tmp/patrol-recording-optimized.mp4
+          if-no-files-found: warn
