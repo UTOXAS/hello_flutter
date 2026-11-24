@@ -28,6 +28,15 @@ android {
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName
+
+        // ADDED: Patrol runner and clean-state argument
+        testInstrumentationRunner = "pl.leancode.patrol.PatrolJUnitRunner"
+        testInstrumentationRunnerArguments["clearPackageData"] = "true"
+    }
+
+    // ADDED: run each test in its own process via the orchestrator
+    testOptions {
+        execution = "ANDROIDX_TEST_ORCHESTRATOR"
     }
 
     buildTypes {
@@ -37,6 +46,11 @@ android {
             signingConfig = signingConfigs.getByName("debug")
         }
     }
+}
+
+// ADDED: orchestrator test utility dependency
+dependencies {
+    androidTestUtil("androidx.test:orchestrator:1.5.1")
 }
 
 flutter {
