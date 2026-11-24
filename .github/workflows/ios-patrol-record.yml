@@ -1,6 +1,5 @@
 name: iOS Patrol Test with Recording
 
-# ADDED: manually triggered workflow, will not run automatically on commits
 on:
   workflow_dispatch:
 
@@ -19,7 +18,6 @@ jobs:
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
-          # MODIFIED: was '3.29.2' (Dart 3.7.2) -> '3.32.8' (Dart 3.8.x) to satisfy pubspec sdk ^3.8.1
           flutter-version: '3.32.8'
           channel: 'stable'
           cache: true
@@ -36,38 +34,37 @@ jobs:
       - name: Boot iOS Simulator
         id: simulator
         run: |
-          # ADDED: create and boot a fixed simulator, output UDID for subsequent steps
-          DEVICE_ID=$(xcrun simctl create "Patrol-iPhone" "com.apple.CoreSimulator.SimDeviceType.iPhone-15" "com.apple.CoreSimulator.SimRuntime.iOS-17-5")
+          # MODIFIED: dynamically query the highest available iOS runtime instead of hardcoding iOS-17-5
+          # ADDED: list all available runtimes, filter out iOS entries, sort by version number descending, take the first
+          RUNTIME=$(xcrun simctl list runtimes | grep -E '^iOS [0-9]' | sort -t' ' -k2 -Vr | head -1 | awk -F' - ' '{print $2}')
+          echo "Selected runtime: $RUNTIME"
+          # ADDED: create simulator using the dynamically obtained runtime
+          DEVICE_ID=$(xcrun simctl create "Patrol-iPhone" "com.apple.CoreSimulator.SimDeviceType.iPhone-15" "$RUNTIME")
           xcrun simctl boot "$DEVICE_ID"
           echo "udid=$DEVICE_ID" >> $GITHUB_OUTPUT
-          # Wait for the simulator to fully boot
           xcrun simctl bootstatus "$DEVICE_ID" -b
 
       - name: Start screen recording
         run: |
-          # ADDED: record in background, H.264 codec balances file size and compatibility
           xcrun simctl io booted recordVideo --codec=h264 /tmp/patrol-recording.mp4 &
           echo "RECORDING_PID=$!" >> $GITHUB_ENV
-          sleep 2  # ensure recording has started
+          sleep 2
 
       - name: Run Patrol test
         run: |
-          # ADDED: run Patrol test on the booted simulator, --device uses the UDID output earlier
           patrol test \
             --target patrol_test/app_test.dart \
             --device ${{ steps.simulator.outputs.udid }}
 
       - name: Stop screen recording
-        if: always()  # stop recording even if the test fails
+        if: always()
         run: |
           kill -INT $RECORDING_PID || true
-          sleep 3  # wait for file to be written
+          sleep 3
 
       - name: Optimize recording size
         if: always()
         run: |
-          # ADDED: use ffmpeg to compress the recording, CRF 28 keeps content readable while reducing file size
-          # macOS runners come with ffmpeg preinstalled
           if [ -f /tmp/patrol-recording.mp4 ]; then
             ffmpeg -i /tmp/patrol-recording.mp4 \
               -c:v libx264 -crf 28 -preset fast -movflags +faststart \
