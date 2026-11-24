@@ -1,7 +1,8 @@
 package com.example.hello_flutter
 
+// REMOVED: import androidx.test.uiautomator.UiDevice (unused, could break androidTest compilation)
+
 import androidx.test.platform.app.InstrumentationRegistry
-import androidx.test.uiautomator.UiDevice // ADDED: change to your package
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.junit.runners.Parameterized
