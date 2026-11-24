@@ -31,12 +31,14 @@ jobs:
       - name: Add pub cache bin to PATH
         run: echo "$HOME/.pub-cache/bin" >> $GITHUB_PATH
 
+      # ADDED: ffmpeg is not preinstalled on macos-latest; install via Homebrew before optimizing the recording
+      - name: Install ffmpeg
+        run: brew install ffmpeg
+
       - name: Boot iOS Simulator
         id: simulator
         run: |
-          # MODIFIED: extract the full runtime identifier (e.g. com.apple.CoreSimulator.SimRuntime.iOS-18-0)
-          # instead of a fragment of the line. Filter iOS entries, sort by version (desc), take the first,
-          # then grep out the com.apple.CoreSimulator.SimRuntime.iOS-* token.
+          # MODIFIED: extract the full runtime identifier
           RUNTIME=$(xcrun simctl list runtimes \
             | grep -E 'iOS [0-9]+\.[0-9]+ ' \
             | sort -t' ' -k2 -Vr \
