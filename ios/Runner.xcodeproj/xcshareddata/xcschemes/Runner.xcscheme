@@ -40,12 +40,12 @@
       <Testables>
          <TestableReference
             skipped = "NO"
-            parallelizable = "YES">
+            parallelizable = "NO">  <!-- MODIFIED: was "YES"; disabling parallelization prevents simulator cloning -->
             <BuildableReference
                BuildableIdentifier = "primary"
                BlueprintIdentifier = "331C8080294A63A400263BE5"
-               BuildableName = "RunnerTests.xctest"
-               BlueprintName = "RunnerTests"
+               BuildableName = "RunnerUITests.xctest">  <!-- MODIFIED: was "RunnerTests.xctest" -->
+               BlueprintName = "RunnerUITests">  <!-- MODIFIED: was "RunnerTests" -->
                ReferencedContainer = "container:Runner.xcodeproj">
             </BuildableReference>
          </TestableReference>
