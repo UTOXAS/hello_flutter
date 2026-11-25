@@ -31,19 +31,20 @@ jobs:
       - name: Add pub cache bin to PATH
         run: echo "$HOME/.pub-cache/bin" >> $GITHUB_PATH
 
-      # ADDED: patch patrol_cli to increase destination timeout (known issue on CI/Xcode 16)
-      - name: Patch Patrol CLI destination timeout
+      # MODIFIED: more robust patch using perl to handle various source formats
+      - name: Patch Patrol CLI destination timeout and destination format
         run: |
-          # Find the patrol_cli package source
           PATROL_CLI_PATH=$(find "$HOME/.pub-cache" -type d -name "patrol_cli-*" | head -1)
           echo "Patching patrol_cli at: $PATROL_CLI_PATH"
-          # Replace hardcoded destination-timeout 1 with 120
-          grep -rl "destination-timeout" "$PATROL_CLI_PATH/lib" | while read file; do
-            sed -i '' 's/destination-timeout.*1/destination-timeout", "120"/g' "$file" || true
-            sed -i '' 's/"-destination-timeout", "1"/"-destination-timeout", "120"/g' "$file" || true
-          done
+          # Increase destination timeout from 1 to 120
+          find "$PATROL_CLI_PATH/lib" -type f -name "*.dart" -exec perl -pi -e "s/'-destination-timeout',\s*'1'/'-destination-timeout', '120'/g" {} \;
+          find "$PATROL_CLI_PATH/lib" -type f -name "*.dart" -exec perl -pi -e 's/"-destination-timeout",\s*"1"/"-destination-timeout", "120"/g' {} \;
           # Verify patch applied
-          grep -rn "destination-timeout" "$PATROL_CLI_PATH/lib" || echo "No destination-timeout found (may use different flag name)"
+          echo "=== Verification: destination-timeout occurrences ==="
+          grep -rn "destination-timeout" "$PATROL_CLI_PATH/lib" | head -10
+          # Remove stale snapshot so patched source is used
+          rm -f ~/.pub-cache/global_packages/patrol_cli/bin/main.dart-*.snapshot 2>/dev/null || true
+          echo "Snapshot removed if present"
 
       - name: Install ffmpeg
         run: brew install ffmpeg
@@ -70,7 +71,6 @@ jobs:
 
       - name: Run Patrol test
         run: |
-          # ADDED: verbose flag to capture full xcodebuild output if still failing
           patrol test \
             --target patrol_test/app_test.dart \
             --device ${{ steps.simulator.outputs.udid }} \
