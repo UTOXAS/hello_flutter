@@ -47,6 +47,7 @@ jobs:
           echo "Snapshot removed if present"
 
       - name: Install ffmpeg
+        continue-on-error: true # ADDED: a failed install must not fail the job; raw recording is used as fallback
         run: brew install ffmpeg
 
       - name: Boot iOS Simulator
@@ -63,18 +64,17 @@ jobs:
           echo "udid=$DEVICE_ID" >> $GITHUB_OUTPUT
           xcrun simctl bootstatus "$DEVICE_ID" -b
 
-      # REMOVED: "Start screen recording" step (it recorded the whole build). Recording now starts inside the step below.
-
-      # MODIFIED: renamed; recording starts only when the app process launches and stops right after the test
       - name: Run Patrol test with recording
-        shell: bash # ADDED: explicit bash (pipefail, consistent behavior)
+        shell: bash
         run: |
-          UDID="${{ steps.simulator.outputs.udid }}" # ADDED:
-          APP_ID="com.example.helloFlutter" # ADDED: iOS bundle id from project.pbxproj
-          VIDEO=/tmp/patrol-recording.mp4 # ADDED:
-          rm -f "$VIDEO" # ADDED:
+          UDID="${{ steps.simulator.outputs.udid }}"
+          APP_ID="com.example.helloFlutter"
+          VIDEO=/tmp/patrol-recording.mp4
+          rm -f "$VIDEO"
 
-          # ADDED: background watcher - waits for the app process, then starts recording
+          set -m # ADDED: job control, so the background recorder gets a default SIGINT handler (required for a clean stop)
+
+          # Background watcher - waits for the app process, then starts recording
           (
             until xcrun simctl spawn "$UDID" launchctl list 2>/dev/null | grep -F "UIKitApplication:$APP_ID" > /dev/null; do
               sleep 0.5
@@ -84,44 +84,72 @@ jobs:
           ) &
           WATCHER_PID=$!
 
-          set +e # ADDED: keep going after test failure so recording is always stopped
+          set +e
           patrol test \
             --target patrol_test/app_test.dart \
             --device "$UDID" \
             --verbose
-          STATUS=$? # ADDED:
-          set -e # ADDED:
+          STATUS=$?
+          set -e
 
-          # ADDED: stop recording right after the test and wait for the file to finalize
+          sleep 2 # ADDED: capture the final frames of the test
+
+          # MODIFIED: graceful stop - SIGINT first, wait up to 30s for the MP4 to finalize
           kill -INT "$WATCHER_PID" 2>/dev/null || true
-          for _ in $(seq 1 20); do
+          for _ in $(seq 1 60); do
             kill -0 "$WATCHER_PID" 2>/dev/null || break
             sleep 0.5
           done
-          kill -TERM "$WATCHER_PID" 2>/dev/null || true
+          # ADDED: SIGTERM only as a last resort (can corrupt the file)
+          if kill -0 "$WATCHER_PID" 2>/dev/null; then
+            echo "::warning::Recorder did not exit within 30s, forcing stop"
+            kill -TERM "$WATCHER_PID" 2>/dev/null || true
+          fi
           wait "$WATCHER_PID" 2>/dev/null || true
+
+          # ADDED: show what was produced
+          ls -l "$VIDEO" 2>/dev/null || echo "::warning::No recording file produced"
           exit $STATUS
 
-      # REMOVED: "Stop screen recording" step (handled inside "Run Patrol test with recording")
-
+      # MODIFIED: safe optimization - verified output, falls back to the raw recording
       - name: Optimize recording size
         if: always()
+        shell: bash
         run: |
-          if [ -f /tmp/patrol-recording.mp4 ]; then
-            # ADDED: print duration to verify the recording is valid and short
-            ffprobe -v error -show_entries format=duration -of default=nw=1 /tmp/patrol-recording.mp4
-            ffmpeg -y -i /tmp/patrol-recording.mp4 \
-              -c:v libx264 -crf 28 -preset fast -movflags +faststart \
-              -an /tmp/patrol-recording-optimized.mp4
-            ls -lh /tmp/patrol-recording*.mp4
-          else
-            echo "No recording file found"
+          RAW=/tmp/patrol-recording.mp4
+          OPT=/tmp/patrol-recording-optimized.mp4
+          FINAL=/tmp/patrol-recording-final.mp4
+
+          if [ ! -s "$RAW" ]; then
+            echo "::warning::No recording file found"
+            exit 0
           fi
 
+          # Raw file sanity check
+          ffprobe -v error -show_entries format=duration -of default=nw=1 "$RAW" || echo "::warning::Raw recording is not readable by ffprobe"
+
+          # Re-encode: 720px wide (even height), 30fps, yuv420p; then verify the result fully decodes
+          if command -v ffmpeg > /dev/null \
+            && ffmpeg -y -v error -i "$RAW" \
+                 -vf "fps=30,scale=720:-2,format=yuv420p" \
+                 -c:v libx264 -preset veryfast -crf 26 \
+                 -movflags +faststart -an "$OPT" \
+            && ffmpeg -v error -i "$OPT" -f null - ; then
+            echo "Optimization OK"
+            cp "$OPT" "$FINAL"
+          else
+            echo "::warning::Optimization failed or ffmpeg missing - using raw recording"
+            cp "$RAW" "$FINAL"
+          fi
+          ls -lh /tmp/patrol-recording*.mp4
+
+      # MODIFIED: upload final (optimized or fallback) + raw file as backup
       - name: Upload recording artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: patrol-ios-recording
-          path: /tmp/patrol-recording-optimized.mp4
+          path: |
+            /tmp/patrol-recording-final.mp4
+            /tmp/patrol-recording.mp4
           if-no-files-found: warn
