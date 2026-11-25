@@ -63,30 +63,54 @@ jobs:
           echo "udid=$DEVICE_ID" >> $GITHUB_OUTPUT
           xcrun simctl bootstatus "$DEVICE_ID" -b
 
-      - name: Start screen recording
-        run: |
-          xcrun simctl io booted recordVideo --codec=h264 /tmp/patrol-recording.mp4 &
-          echo "RECORDING_PID=$!" >> $GITHUB_ENV
-          sleep 2
+      # REMOVED: "Start screen recording" step (it recorded the whole build). Recording now starts inside the step below.
 
-      - name: Run Patrol test
+      # MODIFIED: renamed; recording starts only when the app process launches and stops right after the test
+      - name: Run Patrol test with recording
+        shell: bash # ADDED: explicit bash (pipefail, consistent behavior)
         run: |
+          UDID="${{ steps.simulator.outputs.udid }}" # ADDED:
+          APP_ID="com.example.helloFlutter" # ADDED: iOS bundle id from project.pbxproj
+          VIDEO=/tmp/patrol-recording.mp4 # ADDED:
+          rm -f "$VIDEO" # ADDED:
+
+          # ADDED: background watcher - waits for the app process, then starts recording
+          (
+            until xcrun simctl spawn "$UDID" launchctl list 2>/dev/null | grep -F "UIKitApplication:$APP_ID" > /dev/null; do
+              sleep 0.5
+            done
+            echo ">>> App launched - recording started"
+            exec xcrun simctl io "$UDID" recordVideo --codec=h264 --force "$VIDEO"
+          ) &
+          WATCHER_PID=$!
+
+          set +e # ADDED: keep going after test failure so recording is always stopped
           patrol test \
             --target patrol_test/app_test.dart \
-            --device ${{ steps.simulator.outputs.udid }} \
+            --device "$UDID" \
             --verbose
+          STATUS=$? # ADDED:
+          set -e # ADDED:
 
-      - name: Stop screen recording
-        if: always()
-        run: |
-          kill -INT $RECORDING_PID || true
-          sleep 3
+          # ADDED: stop recording right after the test and wait for the file to finalize
+          kill -INT "$WATCHER_PID" 2>/dev/null || true
+          for _ in $(seq 1 20); do
+            kill -0 "$WATCHER_PID" 2>/dev/null || break
+            sleep 0.5
+          done
+          kill -TERM "$WATCHER_PID" 2>/dev/null || true
+          wait "$WATCHER_PID" 2>/dev/null || true
+          exit $STATUS
+
+      # REMOVED: "Stop screen recording" step (handled inside "Run Patrol test with recording")
 
       - name: Optimize recording size
         if: always()
         run: |
           if [ -f /tmp/patrol-recording.mp4 ]; then
-            ffmpeg -i /tmp/patrol-recording.mp4 \
+            # ADDED: print duration to verify the recording is valid and short
+            ffprobe -v error -show_entries format=duration -of default=nw=1 /tmp/patrol-recording.mp4
+            ffmpeg -y -i /tmp/patrol-recording.mp4 \
               -c:v libx264 -crf 28 -preset fast -movflags +faststart \
               -an /tmp/patrol-recording-optimized.mp4
             ls -lh /tmp/patrol-recording*.mp4
