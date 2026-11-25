@@ -1,4 +1,4 @@
-# ADDED: static Podfile with RunnerUITests target and inherit! :complete
+# ADDED: static Podfile with RunnerUITests target
 platform :ios, '13.0'
 
 ENV['COCOAPODS_DISABLE_STATS'] = 'true'
@@ -32,10 +32,10 @@ target 'Runner' do
 
   flutter_install_all_ios_pods File.dirname(File.realpath(__FILE__))
 
-  # MODIFIED: target name changed from RunnerTests to RunnerUITests
-  # MODIFIED: inherit changed from :search_paths to :complete (Patrol UI test requirement)
+  # MODIFIED: target name is RunnerUITests
+  # MODIFIED: inherit changed from :complete to :search_paths to fix xctestrun generation
   target 'RunnerUITests' do
-    inherit! :complete
+    inherit! :search_paths  # MODIFIED: was :complete
   end
 end
 
