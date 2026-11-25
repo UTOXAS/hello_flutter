@@ -38,14 +38,16 @@
          </BuildableReference>
       </MacroExpansion>
       <Testables>
+         <!-- MODIFIED: parallelizable was "YES"; "NO" prevents simulator cloning -->
          <TestableReference
             skipped = "NO"
-            parallelizable = "NO">  <!-- MODIFIED: was "YES"; disabling parallelization prevents simulator cloning -->
+            parallelizable = "NO">
+            <!-- MODIFIED: points to RunnerUITests (was RunnerTests). BlueprintName and ReferencedContainer are back inside the tag. Comments were REMOVED from the attribute list -->
             <BuildableReference
                BuildableIdentifier = "primary"
                BlueprintIdentifier = "331C8080294A63A400263BE5"
-               BuildableName = "RunnerUITests.xctest">  <!-- MODIFIED: was "RunnerTests.xctest" -->
-               BlueprintName = "RunnerUITests">  <!-- MODIFIED: was "RunnerTests" -->
+               BuildableName = "RunnerUITests.xctest"
+               BlueprintName = "RunnerUITests"
                ReferencedContainer = "container:Runner.xcodeproj">
             </BuildableReference>
          </TestableReference>
