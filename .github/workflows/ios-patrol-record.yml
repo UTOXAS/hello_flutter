@@ -6,7 +6,7 @@ on:
 jobs:
   patrol-ios:
     runs-on: macos-latest
-    timeout-minutes: 40
+    timeout-minutes: 25 # MODIFIED: was 40, fail faster on hangs
 
     steps:
       - name: Checkout repository
@@ -15,41 +15,30 @@ jobs:
       - name: Select Xcode
         run: sudo xcode-select -s /Applications/Xcode.app
 
-      - name: Setup Flutter
-        uses: subosito/flutter-action@v2
-        with:
-          flutter-version: '3.32.8'
-          channel: 'stable'
-          cache: true
-
-      - name: Flutter pub get
-        run: flutter pub get
-
-      - name: Install Patrol CLI
-        run: dart pub global activate patrol_cli
-
-      - name: Add pub cache bin to PATH
-        run: echo "$HOME/.pub-cache/bin" >> $GITHUB_PATH
-
-      # MODIFIED: more robust patch using perl to handle various source formats
-      - name: Patch Patrol CLI destination timeout and destination format
+      # ADDED: ffmpeg installs in the background while everything else runs (waited for in "Optimize recording size")
+      - name: Install ffmpeg (background)
+        shell: bash
         run: |
-          PATROL_CLI_PATH=$(find "$HOME/.pub-cache" -type d -name "patrol_cli-*" | head -1)
-          echo "Patching patrol_cli at: $PATROL_CLI_PATH"
-          # Increase destination timeout from 1 to 120
-          find "$PATROL_CLI_PATH/lib" -type f -name "*.dart" -exec perl -pi -e "s/'-destination-timeout',\s*'1'/'-destination-timeout', '120'/g" {} \;
-          find "$PATROL_CLI_PATH/lib" -type f -name "*.dart" -exec perl -pi -e 's/"-destination-timeout",\s*"1"/"-destination-timeout", "120"/g' {} \;
-          # Verify patch applied
-          echo "=== Verification: destination-timeout occurrences ==="
-          grep -rn "destination-timeout" "$PATROL_CLI_PATH/lib" | head -10
-          # Remove stale snapshot so patched source is used
-          rm -f ~/.pub-cache/global_packages/patrol_cli/bin/main.dart-*.snapshot 2>/dev/null || true
-          echo "Snapshot removed if present"
+          rm -f /tmp/ffmpeg.done
+          if command -v ffmpeg > /dev/null 2>&1; then
+            touch /tmp/ffmpeg.done
+          else
+            nohup bash -c 'export HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1 HOMEBREW_NO_ENV_HINTS=1 HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK=1; brew install ffmpeg > /tmp/ffmpeg-install.log 2>&1; touch /tmp/ffmpeg.done' > /dev/null 2>&1 &
+          fi
 
-      - name: Install ffmpeg
-        continue-on-error: true # ADDED: a failed install must not fail the job; raw recording is used as fallback
-        run: brew install ffmpeg
+      # ADDED: faster xcodebuild - no index store, arm64-only simulator slices (runner is arm64)
+      - name: Configure fast xcodebuild settings
+        shell: bash
+        run: |
+          XCFG="$RUNNER_TEMP/ci-fast.xcconfig"
+          echo 'COMPILER_INDEX_STORE_ENABLE = NO' > "$XCFG"
+          if [ "$(uname -m)" = "arm64" ]; then
+            echo 'EXCLUDED_ARCHS[sdk=iphonesimulator*] = x86_64 i386' >> "$XCFG"
+          fi
+          echo "XCODE_XCCONFIG_FILE=$XCFG" >> "$GITHUB_ENV"
+          cat "$XCFG"
 
+      # MODIFIED: moved up so the simulator boots in parallel with Flutter/Patrol setup
       - name: Boot iOS Simulator
         id: simulator
         run: |
@@ -62,7 +51,54 @@ jobs:
           DEVICE_ID=$(xcrun simctl create "Patrol-iPhone" "com.apple.CoreSimulator.SimDeviceType.iPhone-15" "$RUNTIME")
           xcrun simctl boot "$DEVICE_ID"
           echo "udid=$DEVICE_ID" >> $GITHUB_OUTPUT
-          xcrun simctl bootstatus "$DEVICE_ID" -b
+          # REMOVED: xcrun simctl bootstatus "$DEVICE_ID" -b (the wait now happens in "Run Patrol test with recording")
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.32.8'
+          channel: 'stable'
+          cache: true
+
+      # ADDED: cache pub packages + patched Patrol CLI (skips CLI activation on later runs)
+      - name: Cache pub packages and Patrol CLI
+        uses: actions/cache@v4
+        with:
+          path: ~/.pub-cache
+          key: pub-${{ runner.os }}-${{ runner.arch }}-patrolcli4.10.0-${{ hashFiles('pubspec.lock') }}
+          restore-keys: |
+            pub-${{ runner.os }}-${{ runner.arch }}-patrolcli4.10.0-
+
+      - name: Flutter pub get
+        run: flutter pub get
+
+      # MODIFIED: pinned version, activation skipped when restored from cache
+      - name: Install Patrol CLI
+        run: |
+          if ! dart pub global list | grep -q "patrol_cli 4.10.0"; then
+            dart pub global activate patrol_cli 4.10.0
+          fi
+
+      - name: Add pub cache bin to PATH
+        run: echo "$HOME/.pub-cache/bin" >> $GITHUB_PATH
+
+      # MODIFIED: more robust patch using perl to handle various source formats (idempotent, safe on cached runs)
+      - name: Patch Patrol CLI destination timeout and destination format
+        run: |
+          PATROL_CLI_PATH=$(find "$HOME/.pub-cache" -type d -name "patrol_cli-4.10.0" | head -1) # MODIFIED: exact version
+          echo "Patching patrol_cli at: $PATROL_CLI_PATH"
+          # Increase destination timeout from 1 to 120
+          find "$PATROL_CLI_PATH/lib" -type f -name "*.dart" -exec perl -pi -e "s/'-destination-timeout',\s*'1'/'-destination-timeout', '120'/g" {} \;
+          find "$PATROL_CLI_PATH/lib" -type f -name "*.dart" -exec perl -pi -e 's/"-destination-timeout",\s*"1"/"-destination-timeout", "120"/g' {} \;
+          # Verify patch applied
+          echo "=== Verification: destination-timeout occurrences ==="
+          grep -rn "destination-timeout" "$PATROL_CLI_PATH/lib" | head -10
+          # Remove stale snapshot so patched source is used
+          rm -f ~/.pub-cache/global_packages/patrol_cli/bin/main.dart-*.snapshot 2>/dev/null || true
+          echo "Snapshot removed if present"
+
+      # REMOVED: "Install ffmpeg" step (now runs in the background, see above)
+      # REMOVED: "Boot iOS Simulator" from this position (moved up)
 
       - name: Run Patrol test with recording
         shell: bash
@@ -72,7 +108,9 @@ jobs:
           VIDEO=/tmp/patrol-recording.mp4
           rm -f "$VIDEO"
 
-          set -m # ADDED: job control, so the background recorder gets a default SIGINT handler (required for a clean stop)
+          xcrun simctl bootstatus "$UDID" -b # ADDED: wait for the simulator booted earlier (usually already ready)
+
+          set -m # job control, so the background recorder gets a default SIGINT handler (required for a clean stop)
 
           # Background watcher - waits for the app process, then starts recording
           (
@@ -92,26 +130,26 @@ jobs:
           STATUS=$?
           set -e
 
-          sleep 2 # ADDED: capture the final frames of the test
+          sleep 2 # capture the final frames of the test
 
-          # MODIFIED: graceful stop - SIGINT first, wait up to 30s for the MP4 to finalize
+          # graceful stop - SIGINT first, wait up to 30s for the MP4 to finalize
           kill -INT "$WATCHER_PID" 2>/dev/null || true
           for _ in $(seq 1 60); do
             kill -0 "$WATCHER_PID" 2>/dev/null || break
             sleep 0.5
           done
-          # ADDED: SIGTERM only as a last resort (can corrupt the file)
+          # SIGTERM only as a last resort (can corrupt the file)
           if kill -0 "$WATCHER_PID" 2>/dev/null; then
             echo "::warning::Recorder did not exit within 30s, forcing stop"
             kill -TERM "$WATCHER_PID" 2>/dev/null || true
           fi
           wait "$WATCHER_PID" 2>/dev/null || true
 
-          # ADDED: show what was produced
+          # show what was produced
           ls -l "$VIDEO" 2>/dev/null || echo "::warning::No recording file produced"
           exit $STATUS
 
-      # MODIFIED: safe optimization - verified output, falls back to the raw recording
+      # safe optimization - verified output, falls back to the raw recording
       - name: Optimize recording size
         if: always()
         shell: bash
@@ -124,6 +162,13 @@ jobs:
             echo "::warning::No recording file found"
             exit 0
           fi
+
+          # ADDED: wait for the background ffmpeg install (normally finished long ago)
+          for _ in $(seq 1 600); do
+            [ -f /tmp/ffmpeg.done ] && break
+            sleep 0.5
+          done
+          tail -n 3 /tmp/ffmpeg-install.log 2>/dev/null || true
 
           # Raw file sanity check
           ffprobe -v error -show_entries format=duration -of default=nw=1 "$RAW" || echo "::warning::Raw recording is not readable by ffprobe"
@@ -143,13 +188,12 @@ jobs:
           fi
           ls -lh /tmp/patrol-recording*.mp4
 
-      # MODIFIED: upload final (optimized or fallback) + raw file as backup
+      # MODIFIED: upload only the optimized file
       - name: Upload recording artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: patrol-ios-recording
-          path: |
-            /tmp/patrol-recording-final.mp4
-            /tmp/patrol-recording.mp4
+          path: /tmp/patrol-recording-final.mp4 # MODIFIED: removed /tmp/patrol-recording.mp4 (raw)
           if-no-files-found: warn
+          compression-level: 0 # ADDED: MP4 is already compressed, skip zipping
