@@ -32,10 +32,10 @@ target 'Runner' do
 
   flutter_install_all_ios_pods File.dirname(File.realpath(__FILE__))
 
-  # MODIFIED: target name is RunnerUITests
-  # MODIFIED: inherit changed from :complete to :search_paths to fix xctestrun generation
+  # MODIFIED: reverted inherit from :search_paths to :complete
+  # :complete embeds all frameworks into the test runner so xctestrun contains valid TestBundlePath
   target 'RunnerUITests' do
-    inherit! :search_paths  # MODIFIED: was :complete
+    inherit! :complete  # MODIFIED: was :search_paths
   end
 end
 
