@@ -6,7 +6,9 @@ on:
 jobs:
   patrol-ios:
     runs-on: macos-latest
-    timeout-minutes: 25 # MODIFIED: was 40, fail faster on hangs
+    timeout-minutes: 20 # MODIFIED: was 25 (a run takes ~14 min)
+    env:
+      IOS_MAJOR: '18' # ADDED: preferred simulator iOS major version ('' = always use the newest)
 
     steps:
       - name: Checkout repository
@@ -15,7 +17,7 @@ jobs:
       - name: Select Xcode
         run: sudo xcode-select -s /Applications/Xcode.app
 
-      # ADDED: ffmpeg installs in the background while everything else runs (waited for in "Optimize recording size")
+      # ffmpeg installs in the background while everything else runs (waited for in "Optimize recording size")
       - name: Install ffmpeg (background)
         shell: bash
         run: |
@@ -26,7 +28,7 @@ jobs:
             nohup bash -c 'export HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1 HOMEBREW_NO_ENV_HINTS=1 HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK=1; brew install ffmpeg > /tmp/ffmpeg-install.log 2>&1; touch /tmp/ffmpeg.done' > /dev/null 2>&1 &
           fi
 
-      # ADDED: faster xcodebuild - no index store, arm64-only simulator slices (runner is arm64)
+      # faster xcodebuild - no index store, arm64-only simulator slices (runner is arm64)
       - name: Configure fast xcodebuild settings
         shell: bash
         run: |
@@ -38,29 +40,47 @@ jobs:
           echo "XCODE_XCCONFIG_FILE=$XCFG" >> "$GITHUB_ENV"
           cat "$XCFG"
 
-      # MODIFIED: moved up so the simulator boots in parallel with Flutter/Patrol setup
+      # boots in the background while Flutter/Patrol setup runs
       - name: Boot iOS Simulator
         id: simulator
         run: |
-          RUNTIME=$(xcrun simctl list runtimes \
-            | grep -E 'iOS [0-9]+\.[0-9]+ ' \
-            | sort -t' ' -k2 -Vr \
-            | head -1 \
-            | grep -oE 'com\.apple\.CoreSimulator\.SimRuntime\.iOS-[0-9-]+')
+          # ADDED: print installed runtimes for debugging
+          xcrun simctl list runtimes | grep iOS || true
+
+          # MODIFIED: prefer the IOS_MAJOR runtime (faster on CI), fall back to the newest installed one
+          pick_runtime() {
+            xcrun simctl list runtimes \
+              | grep -E "$1" \
+              | grep -vi unavailable \
+              | sort -t' ' -k2 -Vr \
+              | head -1 \
+              | grep -oE 'com\.apple\.CoreSimulator\.SimRuntime\.iOS-[0-9-]+'
+          }
+          RUNTIME=""
+          if [ -n "$IOS_MAJOR" ]; then
+            RUNTIME=$(pick_runtime "iOS ${IOS_MAJOR}\.[0-9]+ ") || RUNTIME=""
+          fi
+          if [ -z "$RUNTIME" ]; then
+            RUNTIME=$(pick_runtime 'iOS [0-9]+\.[0-9]+ ')
+          fi
           echo "Selected runtime: $RUNTIME"
           DEVICE_ID=$(xcrun simctl create "Patrol-iPhone" "com.apple.CoreSimulator.SimDeviceType.iPhone-15" "$RUNTIME")
           xcrun simctl boot "$DEVICE_ID"
           echo "udid=$DEVICE_ID" >> $GITHUB_OUTPUT
-          # REMOVED: xcrun simctl bootstatus "$DEVICE_ID" -b (the wait now happens in "Run Patrol test with recording")
+          # the wait for boot happens in "Run Patrol test with recording"
 
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
           flutter-version: '3.32.8'
           channel: 'stable'
-          cache: true
+          cache: false # MODIFIED: was true (restoring the ~2 GB SDK cache took 2m53s)
 
-      # ADDED: cache pub packages + patched Patrol CLI (skips CLI activation on later runs)
+      # ADDED: fewer device discoverers for `flutter devices` (Patrol calls it before every build)
+      - name: Trim Flutter device discovery
+        run: flutter config --no-analytics --no-cli-animations --no-enable-android --no-enable-web --no-enable-macos-desktop --no-enable-linux-desktop --no-enable-windows-desktop || echo "::warning::flutter config failed (non-fatal)"
+
+      # cache pub packages + patched Patrol CLI (skips CLI activation and rebuild on later runs)
       - name: Cache pub packages and Patrol CLI
         uses: actions/cache@v4
         with:
@@ -72,7 +92,7 @@ jobs:
       - name: Flutter pub get
         run: flutter pub get
 
-      # MODIFIED: pinned version, activation skipped when restored from cache
+      # pinned version, activation skipped when restored from cache
       - name: Install Patrol CLI
         run: |
           if ! dart pub global list | grep -q "patrol_cli 4.10.0"; then
@@ -82,23 +102,23 @@ jobs:
       - name: Add pub cache bin to PATH
         run: echo "$HOME/.pub-cache/bin" >> $GITHUB_PATH
 
-      # MODIFIED: more robust patch using perl to handle various source formats (idempotent, safe on cached runs)
+      # MODIFIED: patch + snapshot removal only when the patch is still needed (a cached CLI is already patched and compiled)
       - name: Patch Patrol CLI destination timeout and destination format
         run: |
-          PATROL_CLI_PATH=$(find "$HOME/.pub-cache" -type d -name "patrol_cli-4.10.0" | head -1) # MODIFIED: exact version
-          echo "Patching patrol_cli at: $PATROL_CLI_PATH"
-          # Increase destination timeout from 1 to 120
-          find "$PATROL_CLI_PATH/lib" -type f -name "*.dart" -exec perl -pi -e "s/'-destination-timeout',\s*'1'/'-destination-timeout', '120'/g" {} \;
-          find "$PATROL_CLI_PATH/lib" -type f -name "*.dart" -exec perl -pi -e 's/"-destination-timeout",\s*"1"/"-destination-timeout", "120"/g' {} \;
-          # Verify patch applied
+          PATROL_CLI_PATH=$(find "$HOME/.pub-cache" -type d -name "patrol_cli-4.10.0" | head -1)
+          echo "Patrol CLI at: $PATROL_CLI_PATH"
+          if grep -rEq "destination-timeout['\"],[[:space:]]*['\"]1['\"]" "$PATROL_CLI_PATH/lib"; then # ADDED: only when not patched yet
+            echo "Patching destination-timeout 1 -> 120"
+            find "$PATROL_CLI_PATH/lib" -type f -name "*.dart" -exec perl -pi -e "s/'-destination-timeout',\s*'1'/'-destination-timeout', '120'/g" {} \;
+            find "$PATROL_CLI_PATH/lib" -type f -name "*.dart" -exec perl -pi -e 's/"-destination-timeout",\s*"1"/"-destination-timeout", "120"/g' {} \;
+            # Remove stale snapshot so patched source is used (MODIFIED: now only after a real patch)
+            rm -f ~/.pub-cache/global_packages/patrol_cli/bin/main.dart-*.snapshot 2>/dev/null || true
+            echo "Snapshot removed"
+          else
+            echo "Already patched - keeping compiled snapshot" # ADDED:
+          fi
           echo "=== Verification: destination-timeout occurrences ==="
           grep -rn "destination-timeout" "$PATROL_CLI_PATH/lib" | head -10
-          # Remove stale snapshot so patched source is used
-          rm -f ~/.pub-cache/global_packages/patrol_cli/bin/main.dart-*.snapshot 2>/dev/null || true
-          echo "Snapshot removed if present"
-
-      # REMOVED: "Install ffmpeg" step (now runs in the background, see above)
-      # REMOVED: "Boot iOS Simulator" from this position (moved up)
 
       - name: Run Patrol test with recording
         shell: bash
@@ -108,7 +128,7 @@ jobs:
           VIDEO=/tmp/patrol-recording.mp4
           rm -f "$VIDEO"
 
-          xcrun simctl bootstatus "$UDID" -b # ADDED: wait for the simulator booted earlier (usually already ready)
+          xcrun simctl bootstatus "$UDID" -b # wait for the simulator booted earlier (usually already ready)
 
           set -m # job control, so the background recorder gets a default SIGINT handler (required for a clean stop)
 
@@ -163,7 +183,7 @@ jobs:
             exit 0
           fi
 
-          # ADDED: wait for the background ffmpeg install (normally finished long ago)
+          # wait for the background ffmpeg install (normally finished long ago)
           for _ in $(seq 1 600); do
             [ -f /tmp/ffmpeg.done ] && break
             sleep 0.5
@@ -188,12 +208,12 @@ jobs:
           fi
           ls -lh /tmp/patrol-recording*.mp4
 
-      # MODIFIED: upload only the optimized file
+      # upload only the optimized file
       - name: Upload recording artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: patrol-ios-recording
-          path: /tmp/patrol-recording-final.mp4 # MODIFIED: removed /tmp/patrol-recording.mp4 (raw)
+          path: /tmp/patrol-recording-final.mp4
           if-no-files-found: warn
-          compression-level: 0 # ADDED: MP4 is already compressed, skip zipping
+          compression-level: 0
