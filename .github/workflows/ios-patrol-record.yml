@@ -31,25 +31,32 @@ jobs:
       - name: Add pub cache bin to PATH
         run: echo "$HOME/.pub-cache/bin" >> $GITHUB_PATH
 
-      # ADDED: ffmpeg is not preinstalled on macos-latest; install via Homebrew before optimizing the recording
+      # ADDED: patch patrol_cli to increase destination timeout (known issue on CI/Xcode 16)
+      - name: Patch Patrol CLI destination timeout
+        run: |
+          # Find the patrol_cli package source
+          PATROL_CLI_PATH=$(find "$HOME/.pub-cache" -type d -name "patrol_cli-*" | head -1)
+          echo "Patching patrol_cli at: $PATROL_CLI_PATH"
+          # Replace hardcoded destination-timeout 1 with 120
+          grep -rl "destination-timeout" "$PATROL_CLI_PATH/lib" | while read file; do
+            sed -i '' 's/destination-timeout.*1/destination-timeout", "120"/g' "$file" || true
+            sed -i '' 's/"-destination-timeout", "1"/"-destination-timeout", "120"/g' "$file" || true
+          done
+          # Verify patch applied
+          grep -rn "destination-timeout" "$PATROL_CLI_PATH/lib" || echo "No destination-timeout found (may use different flag name)"
+
       - name: Install ffmpeg
         run: brew install ffmpeg
 
       - name: Boot iOS Simulator
         id: simulator
         run: |
-          # MODIFIED: extract the full runtime identifier
           RUNTIME=$(xcrun simctl list runtimes \
             | grep -E 'iOS [0-9]+\.[0-9]+ ' \
             | sort -t' ' -k2 -Vr \
             | head -1 \
             | grep -oE 'com\.apple\.CoreSimulator\.SimRuntime\.iOS-[0-9-]+')
           echo "Selected runtime: $RUNTIME"
-          if [ -z "$RUNTIME" ]; then
-            echo "No iOS runtime found on this runner"
-            xcrun simctl list runtimes
-            exit 1
-          fi
           DEVICE_ID=$(xcrun simctl create "Patrol-iPhone" "com.apple.CoreSimulator.SimDeviceType.iPhone-15" "$RUNTIME")
           xcrun simctl boot "$DEVICE_ID"
           echo "udid=$DEVICE_ID" >> $GITHUB_OUTPUT
@@ -63,9 +70,11 @@ jobs:
 
       - name: Run Patrol test
         run: |
+          # ADDED: verbose flag to capture full xcodebuild output if still failing
           patrol test \
             --target patrol_test/app_test.dart \
-            --device ${{ steps.simulator.outputs.udid }}
+            --device ${{ steps.simulator.outputs.udid }} \
+            --verbose
 
       - name: Stop screen recording
         if: always()
